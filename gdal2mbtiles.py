@@ -38,6 +38,7 @@
 import signal, sys
 import time
 import io
+
 import os
 import json
 
@@ -75,7 +76,6 @@ try:
 except:
     # 'antialias' resampling is not available
     pass
-
 
 import multiprocessing
 import traceback
@@ -501,22 +501,7 @@ class GDAL2Mbtiles(object):
         generate_base_tiles()
         generate_overview_tiles()"""
 
-    #
-    # def process(self):
-    #     """The main processing function, runs all the main steps of processing"""
-    #
-    #     # Opening and preprocessing of the input file
-    #     self.open_input()
-    #
-    #     # Generation of main metadata files and HTML viewers
-    #     self.generate_metadata()
-    #
-    #     # Generation of the lowest tiles
-    #     self.generate_base_tiles()
-    #
-    #     # Generation of the overview tiles (higher in the pyramid)
-    #     self.generate_overview_tiles()
-    #
+
     # -------------------------------------------------------------------------
     def error(self, msg, details=""):
         """Print an error message and stop the processing"""
@@ -1253,7 +1238,7 @@ class GDAL2Mbtiles(object):
                     f.close()
 
     # -------------------------------------------------------------------------
-    def generate_base_tiles(self, cpu, queue,con):
+    def generate_base_tiles(self, cpu, queue, con):
         """Generation of the base tiles (the lowest in the pyramid) directly from the input raster"""
         cur = con.cursor()
         if self.options.verbose:
@@ -1288,8 +1273,6 @@ class GDAL2Mbtiles(object):
         queue.put(tcount)
 
         ti = 0
-
-        proc = []
         j = 0
         msg = ''
         tz = self.tmaxz
@@ -1320,13 +1303,7 @@ class GDAL2Mbtiles(object):
                         print("Tile generation skiped because of --resume")
                     else:
                         queue.put(tcount)
-
                     continue
-                # My Addon
-                # Create directories for the tile
-                # if not os.path.exists(os.path.dirname(tilefilename)):
-                #     print tilefilename
-                    # os.makedirs(os.path.dirname(tilefilename))
 
                 if self.options.profile == 'mercator':
                     # Tile bounds in EPSG:900913
@@ -1416,46 +1393,27 @@ class GDAL2Mbtiles(object):
 
                 if self.options.resampling != 'antialias':
                     dstile_array = dstile.ReadAsArray()
-                    # print dstile_array
-
                     binary = io.BytesIO()
-                    img = Image.fromarray(numpy.rollaxis(dstile_array,0,3))
+                    img = Image.fromarray(numpy.rollaxis(dstile_array, 0, 3))  # rotate from (256,256,3) to (3,256,256)
                     img.save(binary, format=self.tiledriver)
-                    # out_file = tempfile.SpooledTemporaryFile('tile.png')
-                    # td, temp_path = tempfile.mkstemp('tile.png')
-                    # print temp_path
-
-                    # self.out_drv.CreateCopy(temp_path, dstile, strict=0)
-                    # out_file = os.open(temp_path, os.O_BINARY)
-                    # file_content = out_file.read()
-                    # print file_content
-                    # Write a copy of tile to png/jpg
 
                     cur.execute("""insert into tiles (zoom_level,
                                             tile_column, tile_row, tile_data) values
                                             (?, ?, ?, ?);""",
-                                (tz, tx, ty, sqlite3.Binary(binary.getvalue()) ))
-                    con.commit()
-                    # cur.close()
+                                (tz, tx, ty, sqlite3.Binary(binary.getvalue())))
+
                     del binary
                     del img
                 del dstile
-
-                # Create a KML file for this tile.
-                if self.kml:
-                    kmlfilename = os.path.join(self.output, str(tz), str(tx), '%d.kml' % ty)
-                    if not self.options.resume or not os.path.exists(kmlfilename):
-                        f = open(kmlfilename, 'w')
-                        f.write(self.generate_kml(tx, ty, tz))
-                        f.close()
-
                 if not self.options.verbose:
+                    con.commit()
                     queue.put(tcount)
 
-    # -------------------------------------------------------------------------
-    def generate_overview_tiles(self, cpu, tz, queue):
-        """Generation of the overview tiles (higher in the pyramid) based on existing tiles"""
 
+    # -------------------------------------------------------------------------
+    def generate_overview_tiles(self, cpu, tz, queue, con):
+        """Generation of the overview tiles (higher in the pyramid) based on existing tiles"""
+        cur = con.cursor()
         tilebands = self.dataBandsCount + 1
 
         # Usage of existing tiles: from 4 underlying tiles generate one as overview.
@@ -1486,11 +1444,9 @@ class GDAL2Mbtiles(object):
                     ty_final = (2 ** tz - 1) - ty
                 else:
                     ty_final = ty
-                # My addition if
+
                 tilefilename = os.path.join(self.output, str(tz), str(tx), "%s.%s" % (ty_final, self.tileext))
-                # if os.path.exists(os.path.abspath(tilefilename)):
-                #     # overview tile already exist
-                #     continue
+
                 if self.options.verbose:
                     print(ti, '/', tcount, tilefilename)  # , "( TileMapService: z / x / y )"
 
@@ -1500,13 +1456,6 @@ class GDAL2Mbtiles(object):
                     else:
                         queue.put(tcount)
                     continue
-
-                # Create directories for the tile
-                # if not os.path.exists(os.path.dirname(tilefilename)):
-                #     try:
-                #         os.makedirs(os.path.dirname(tilefilename))
-                #     except:
-                #         pass
 
                 # TODO: improve that
                 if self.out_drv.ShortName == 'JPEG' and tilebands == 4:
@@ -1522,7 +1471,7 @@ class GDAL2Mbtiles(object):
                 # probably walk should start with reading of four tiles from top left corner
                 # Hilbert curve...
 
-                children = []
+
                 # Read the tiles and write them to query window
                 for y in range(2 * ty, 2 * ty + 2):
                     for x in range(2 * tx, 2 * tx + 2):
@@ -1534,9 +1483,12 @@ class GDAL2Mbtiles(object):
                             else:
                                 y_final = y
 
-                            dsquerytile = gdal.Open(
-                                os.path.join(self.output, str(tz + 1), str(x), "%s.%s" % (y_final, self.tileext)),
-                                gdal.GA_ReadOnly)
+                            tiles = cur.execute('''select  tile_data from tiles
+                                where zoom_level = (?) AND tile_column = (?) AND tile_row = (?) ;''', [tz + 1, x, y])
+                            blob_tile = tiles.fetchone()
+                            pil_tile = Image.open(io.BytesIO(blob_tile[0]))
+                            np_tile = numpy.array(pil_tile)
+
                             if (ty == 0 and y == 1) or (ty != 0 and (y % (2 * ty)) != 0):
                                 tileposy = 0
                             else:
@@ -1547,39 +1499,35 @@ class GDAL2Mbtiles(object):
                                 tileposx = self.tilesize
                             else:
                                 tileposx = 0
-                            dsquery.WriteRaster(tileposx, tileposy, self.tilesize, self.tilesize,
-                                                dsquerytile.ReadRaster(0, 0, self.tilesize, self.tilesize),
-                                                band_list=list(range(1, tilebands + 1)))
-                            children.append([x, y, tz + 1])
+                                # Write Array each band of size (256L,256L)
+                            for i in range(tilebands):
+                                dsquery.GetRasterBand(i + 1).WriteArray(np_tile[:, :, i], tileposx, tileposy)
 
                 self.scale_query_to_tile(dsquery, dstile, tilefilename)
                 # Write a copy of tile to png/jpg
                 #
                 if self.options.resampling != 'antialias':
                     # Write a copy of tile to png/jpg
-                    try:
-                        self.out_drv.CreateCopy(tilefilename, dstile, strict=0)
-                    except:
-                        # can't copy
-                        continue
+                    dstile_array = dstile.ReadAsArray()
+                    binary = io.BytesIO()
+                    img = Image.fromarray(numpy.rollaxis(dstile_array, 0, 3))
+                    img.save(binary, format=self.tiledriver)
+                    cur.execute("""insert into tiles (zoom_level,
+                                                                tile_column, tile_row, tile_data) values
+                                                                (?, ?, ?, ?);""",
+                                (tz, tx, ty, sqlite3.Binary(binary.getvalue())))
 
-                # strict = 0
-                # p = multiprocessing.Process(target=self.out_drv.CreateCopy, args=[tilefilename, dstile, strict])
-                # p.start()
-                # p.join()
+                    del binary
+                    del img
+                del dstile
 
                 if self.options.verbose:
                     print("\tbuild from zoom", tz + 1, " tiles:", (2 * tx, 2 * ty), (2 * tx + 1, 2 * ty),
                           (2 * tx, 2 * ty + 1), (2 * tx + 1, 2 * ty + 1))
 
-                # Create a KML file for this tile.
-                if self.kml:
-                    f = open(os.path.join(self.output, '%d/%d/%d.kml' % (tz, tx, ty)), 'w')
-                    f.write(self.generate_kml(tx, ty, tz, children))
-                    f.close()
-
                 if not self.options.verbose:
                     queue.put(tcount)
+                    con.commit()
                     pass
 
     # -------------------------------------------------------------------------
@@ -2687,118 +2635,13 @@ class GDAL2Mbtiles(object):
             (zoom_level, tile_column, tile_row);""")
 
     def optimize_connection(self, cur):
-        cur.execute("""PRAGMA synchronous=0""")
+        cur.execute("""PRAGMA synchronous=OFF;""")
         # cur.execute("""PRAGMA journal_mode=DELETE""")
-        cur.execute("""PRAGMA journal_mode=WAL""")
-        cur.execute("""PRAGMA cache_size=-2000""")
-        # cur.execute("""PRAGMA page_size=4096""")
-        cur.execute("""PRAGMA page_size=65536""")
-
-
-
-
-        # def disk_to_mbtiles(self,directory_path, mbtiles_file, **kwargs):
-        #     con = self.mbtiles_connect(mbtiles_file)
-        #     cur = con.cursor()
-        #     self.optimize_connection(cur)
-        #     self.mbtiles_setup(cur)
-        #
-        #     # # ~ image_format = 'png'
-        #     # image_format = kwargs.get('format', 'png')
-        #     # try:
-        #     #     metadata = json.load(open(os.path.join(directory_path, 'metadata.json'), 'r'))
-        #     #     image_format = kwargs.get('format')
-        #     #     for name, value in metadata.items():
-        #     #         cur.execute('insert into metadata (name, value) values (?, ?)',
-        #     #                     (name, value))
-        #     #
-        #     # except IOError:
-        #     #     print ('metadata.json not found')
-        #
-        #     count = 0
-        #     start_time = time.time()
-        #     msg = ""
-        #
-        #     for zoomDir in getDirs(directory_path):
-        #
-        #         if kwargs.get("scheme") == 'ags':
-        #             if not "L" in zoomDir:
-        #                 logger.warning("You appear to be using an ags scheme on an non-arcgis Server cache.")
-        #             z = int(zoomDir.replace("L", ""))
-        #         else:
-        #             if "L" in zoomDir:
-        #                 logger.warning(
-        #                     "You appear to be using a %s scheme on an arcgis Server cache. Try using --scheme=ags instead" % kwargs.get(
-        #                         "scheme"))
-        #             z = int(zoomDir)
-        #         for rowDir in getDirs(os.path.join(directory_path, zoomDir)):
-        #             if kwargs.get("scheme") == 'ags':
-        #                 y = flip_y(z, int(rowDir.replace("R", ""), 16))
-        #             else:
-        #                 x = int(rowDir)
-        #             for current_file in os.listdir(os.path.join(directory_path, zoomDir, rowDir)):
-        #                 cur.execute("""BEGIN TRANSACTION""")
-        #                 file_name, ext = current_file.split('.', 1)
-        #                 if file_name == 'Thumbs':
-        #                     continue
-        #                 f = open(os.path.join(directory_path, zoomDir, rowDir, current_file), 'rb')
-        #                 # mine
-        #                 # f_out = open(os.path.join(directory_path, zoomDir, rowDir, file_name+"_chepulya."+ext), 'wb')
-        #
-        #                 file_content = f.read()
-        #                 # mine
-        #                 # f_out.write(file_content)
-        #                 f.close()
-        #                 if kwargs.get('scheme') == 'xyz':
-        #                     y = flip_y(int(z), int(file_name))
-        #                 elif kwargs.get("scheme") == 'ags':
-        #                     x = int(file_name.replace("C", ""), 16)
-        #                 else:
-        #                     y = int(file_name)
-        #
-        #                 if (ext == image_format):
-        #                     # logger.debug(' Read tile from Zoom (z): %i\tCol (x): %i\tRow (y): %i' % (z, x, y))
-        #                     cur.execute("""insert into tiles (zoom_level,
-        #                         tile_column, tile_row, tile_data) values
-        #                         (?, ?, ?, ?);""",
-        #                                 (z, x, y, sqlite3.Binary(file_content)))
-        #
-        #                     count = count + 1
-        #                     if (count % 100) == 0:
-        #                         for c in msg: sys.stdout.write(chr(8))
-        #                         msg = "%s tiles inserted (%d tiles/sec)" % (count, count / (time.time() - start_time))
-        #                         sys.stdout.write(msg)
-        #                         sys.stdout.flush()
-        #                         # con.commit()
-        #
-        #                 elif (ext == 'grid.json'):
-        #                     # logger.debug(' Read grid from Zoom (z): %i\tCol (x): %i\tRow (y): %i' % (z, x, y))
-        #                     # Remove potential callback with regex
-        #                     file_content = file_content.decode('utf-8')
-        #                     has_callback = re.match(r'[\w\s=+-/]+\(({(.|\n)*})\);?', file_content)
-        #                     if has_callback:
-        #                         file_content = has_callback.group(1)
-        #                     utfgrid = json.loads(file_content)
-        #
-        #                     data = utfgrid.pop('data')
-        #                     compressed = zlib.compress(json.dumps(utfgrid).encode())
-        #                     cur.execute(
-        #                         """insert into grids (zoom_level, tile_column, tile_row, grid) values (?, ?, ?, ?) """,
-        #                         (z, x, y, sqlite3.Binary(compressed)))
-        #                     grid_keys = [k for k in utfgrid['keys'] if k != ""]
-        #                     for key_name in grid_keys:
-        #                         key_json = data[key_name]
-        #                         cur.execute(
-        #                             """insert into grid_data (zoom_level, tile_column, tile_row, key_name, key_json) values (?, ?, ?, ?, ?);""",
-        #                             (z, x, y, key_name, json.dumps(key_json)))
-        #
-        #     create_index(cur)
-        #     try:
-        #         cur.execute("""END TRANSACTION""")
-        #     except:
-        #         pass
-        #     logger.debug('tiles (and grids) inserted.')
-        #     optimize_database(con)
+        # cur.execute("""PRAGMA journal_mode=WAL""")
+        cur.execute("""PRAGMA journal_mode=OFF;""")
+        cur.execute("""PRAGMA cache_size=-2000;""")
+        cur.execute("""PRAGMA page_size=65536;""")
+        cur.execute("""PRAGMA foreign_keys=1;""")
 
 
 # =============================================================================
@@ -2820,21 +2663,27 @@ def worker_base_tiles(argv, cpu, queue):
     gdal2mbtiles = GDAL2Mbtiles(argv[1:])
     gdal2mbtiles.open_input()
     con = gdal2mbtiles.mbtiles_connect()
-    gdal2mbtiles.open_input()
-    gdal2mbtiles.generate_base_tiles(cpu, queue, con)
+    gdal2mbtiles.generate_base_tiles(cpu, queue,con)
+    con.close()
 
 
 def worker_overview_tiles(argv, cpu, tz, queue):
     gdal2mbtiles = GDAL2Mbtiles(argv[1:])
-    try:
-        gdal2mbtiles.open_input()
-        gdal2mbtiles.generate_overview_tiles(cpu, tz, queue)
-    except RuntimeError:
-        print ('Exception error: ', traceback.format_exc())
-        pass
+    gdal2mbtiles.open_input()
+    con = gdal2mbtiles.mbtiles_connect()
+    gdal2mbtiles.generate_overview_tiles(cpu, tz, queue, con)
+    con.close()
 
+def timing_val(func):
+    def wrapper(*arg, **kw):
+        t1=time.time()
+        func(*arg, **kw)
+        t2=time.time()
+        return (t2-t1)
+    return wrapper
 
-if __name__ == '__main__':
+@timing_val
+def main():
     queue = multiprocessing.Queue()
     argv = gdal.GeneralCmdLineProcessor(sys.argv)
     proc_count = multiprocessing.cpu_count()
@@ -2851,9 +2700,7 @@ if __name__ == '__main__':
         p.start()
         p.join()
 
-
         print("Generating Base Tiles:")
-
         procs = []
         for cpu in range(proc_count):
             proc = multiprocessing.Process(target=worker_base_tiles, args=(argv, cpu, queue,))
@@ -2869,39 +2716,39 @@ if __name__ == '__main__':
                 gdal.TermProgress_nocb(processed_tiles / float(total))
                 sys.stdout.flush()
             except:
-                # proc.join(timeout=1)
                 pass
         [p.join() for p in procs]
-        print 'dojdalsya'
 
-#
-#         print("\n")
-#         print("Generating Overview Tiles:")
-#         #  Values generated after base tiles creation
-#         tminz = GDAL2Mbtiles.tminz
-#         tmaxz = GDAL2Mbtiles.tmaxz
-#
-#         processed_tiles = 0
-#         for tz in range(tmaxz - 1, tminz - 1, -1):
-#
-#             procs = []
-#             for cpu in range(proc_count):
-#                 proc = multiprocessing.Process(target=worker_overview_tiles, args=(argv, cpu % proc_count, tz, queue))
-#                 proc.daemon = True
-#                 proc.start()
-#                 procs.append(proc)
-#
-#             while len(multiprocessing.active_children()):
-#                 try:
-#                     total = queue.get(timeout=1)
-#                     processed_tiles += 1
-#                     gdal.TermProgress_nocb(processed_tiles / float(total))
-#                     sys.stdout.flush()
-#                 except:
-#                     pass
-#             [p.join(timeout=1) for p in procs]
-#
-#
-# #############
-# # vim:noet
-# #############
+        print("\n")
+        print("Generating Overview Tiles:")
+        #  Values generated after base tiles creation
+        tminz = gdal2mbtiles.tminz
+        tmaxz = gdal2mbtiles.tmaxz
+        processed_tiles = 0
+        for tz in range(tmaxz - 1, tminz - 1, -1):
+
+            for cpu in range(proc_count):
+                proc = multiprocessing.Process(target=worker_overview_tiles, args=(argv, cpu % proc_count, tz, queue))
+                proc.daemon = True
+                proc.start()
+                procs.append(proc)
+
+            while len(multiprocessing.active_children()):
+                try:
+                    total = queue.get(timeout=1)
+                    processed_tiles += 1
+                    gdal.TermProgress_nocb(processed_tiles / float(total))
+                    sys.stdout.flush()
+                except:
+                    pass
+            [p.join(timeout=1) for p in procs]
+
+        print('Indexing tiles')
+        con = gdal2mbtiles.mbtiles_connect()
+        gdal2mbtiles.create_index(con.cursor())
+        con.execute('''PRAGMA journal_mode=DELETE''')
+
+
+if __name__ == '__main__':
+    t = main()
+    print ('Tiling took: {:.2f} seconds '.format(t))
