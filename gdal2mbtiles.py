@@ -586,7 +586,6 @@ class GDAL2Mbtiles(object):
         # if os.path.isdir(self.args[-1]) or (len(self.args) > 1 and not os.path.exists(self.args[-1])):
         self.output = self.args[-1]
         self.args = self.args[:-1]
-
         # More files on the input not directly supported yet
 
         if (len(self.args) > 1):
@@ -2683,11 +2682,17 @@ def timing_val(func):
     return wrapper
 
 @timing_val
-def main():
+def main(argv = None):
     queue = multiprocessing.Queue()
-    argv = gdal.GeneralCmdLineProcessor(sys.argv)
+    if not argv:
+        argv = gdal.GeneralCmdLineProcessor(sys.argv)
     proc_count = multiprocessing.cpu_count()
     # proc_count = 1
+    # gdal2mbtiles = GDAL2Mbtiles(['C:/test', ''])
+    # gdal2mbtiles.args = [u'Y:\\tile\\test\dfgjdfkljg\\12jul18073503-s2as-053897970160_01_p001_1.tif']
+    # print 'options' , gdal2mbtiles.options,
+    # print 'good'
+    # print 'args',  gdal2mbtiles.args
 
     if argv:
         gdal2mbtiles = GDAL2Mbtiles(argv[1:])  # handle command line options
@@ -2708,7 +2713,7 @@ def main():
             proc.start()
             procs.append(proc)
         processed_tiles = 0
-        total = queue.get(timeout=1)
+        total = queue.get()
         while (total - processed_tiles):
             try:
                 total = queue.get_nowait()
