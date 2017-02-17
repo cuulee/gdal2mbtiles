@@ -49,13 +49,16 @@ elif __file__:
     app_path = os.path.dirname(__file__)
     lib_dir = os.path.normpath(os.path.join(os.path.abspath(os.path.dirname(__file__)), '..', 'lib'))
 
+# Uncomment to use local GDAL
 environ_list = os.environ['PATH'].split(';')
 environ_list.insert(0, os.path.join(lib_dir, 'GDAL'))
 environ_list.insert(0, os.path.join(os.getcwd(), 'lib/Python27/Scripts'))
 environ_list.insert(0, os.path.join(os.getcwd(), 'lib/Python27'))
 os.environ['PATH'] = ';'.join(environ_list)
 os.environ['GDAL_DRIVER_PATH'] = os.path.join(lib_dir, '/GDAL', 'gdalplugins')
-os.environ['GDAL_DATA'] = os.path.join(lib_dir, '/GDAL', 'gdal-data')
+os.environ['GDAL_DATA'] = os.path.join(lib_dir, 'GDAL', 'gdal-data')
+os.environ['PROJ_LIB'] = os.path.join(lib_dir, 'GDAL', 'projlib')
+os.environ['PROJ_DEBUG'] = 'ON'
 
 try:
     from osgeo import gdal
@@ -87,7 +90,6 @@ __version__ = "$Id$"
 resampling_list = ('average', 'near', 'bilinear', 'cubic', 'cubicspline', 'lanczos', 'antialias')
 profile_list = ('mercator', 'geodetic', 'raster')  # ,'zoomify')
 webviewer_list = ('all', 'google', 'openlayers', 'leaflet', 'index', 'metadata', 'none')
-queue = multiprocessing.Queue()
 tcount = 0
 # =============================================================================
 # =============================================================================
@@ -501,7 +503,6 @@ class GDAL2Mbtiles(object):
         generate_base_tiles()
         generate_overview_tiles()"""
 
-
     # -------------------------------------------------------------------------
     def error(self, msg, details=""):
         """Print an error message and stop the processing"""
@@ -839,7 +840,6 @@ class GDAL2Mbtiles(object):
         self.out_srs = osr.SpatialReference()
 
         if self.options.profile == 'mercator':
-            # self.out_srs.ImportFromEPSG(900913)
             self.out_srs.ImportFromEPSG(3857)
         elif self.options.profile == 'geodetic':
             self.out_srs.ImportFromEPSG(4326)
@@ -1279,7 +1279,6 @@ class GDAL2Mbtiles(object):
         count = (tmaxy - tminy + 1) * (tmaxx + 1 - tminx)
         for ty in range(tmaxy, tminy - 1, -1):  # range(tminy, tmaxy+1):
             for tx in range(tminx, tmaxx + 1):
-
                 if self.stopped:
                     break
                 ti += 1
@@ -1402,13 +1401,14 @@ class GDAL2Mbtiles(object):
                                             (?, ?, ?, ?);""",
                                 (tz, tx, ty, sqlite3.Binary(binary.getvalue())))
 
-                    del binary
                     del img
-                del dstile
+                    del binary
+                    del dstile_array
+
+                    del dstile
                 if not self.options.verbose:
                     con.commit()
                     queue.put(tcount)
-
 
     # -------------------------------------------------------------------------
     def generate_overview_tiles(self, cpu, tz, queue, con):
@@ -2663,7 +2663,7 @@ def worker_base_tiles(argv, cpu, queue):
     gdal2mbtiles = GDAL2Mbtiles(argv[1:])
     gdal2mbtiles.open_input()
     con = gdal2mbtiles.mbtiles_connect()
-    gdal2mbtiles.generate_base_tiles(cpu, queue,con)
+    gdal2mbtiles.generate_base_tiles(cpu, queue, con)
     con.close()
 
 
@@ -2674,23 +2674,25 @@ def worker_overview_tiles(argv, cpu, tz, queue):
     gdal2mbtiles.generate_overview_tiles(cpu, tz, queue, con)
     con.close()
 
+
 def timing_val(func):
     def wrapper(*arg, **kw):
-        t1=time.time()
+        t1 = time.time()
         func(*arg, **kw)
-        t2=time.time()
-        return (t2-t1)
+        t2 = time.time()
+        return (t2 - t1)
+
     return wrapper
+
 
 @timing_val
 def main():
     queue = multiprocessing.Queue()
     argv = gdal.GeneralCmdLineProcessor(sys.argv)
-    proc_count = multiprocessing.cpu_count()
-    # proc_count = 1
 
     if argv:
         gdal2mbtiles = GDAL2Mbtiles(argv[1:])  # handle command line options
+        proc_count = gdal2mbtiles.options.processes
         if gdal2mbtiles.options.aux_files:
             gdal.SetConfigOption("GDAL_PAM_ENABLED", "YES")
         else:
