@@ -38,9 +38,10 @@
 import signal, sys
 import time
 import io
-
 import os
 import json
+from PyQt4.QtCore import pyqtSlot
+from PyQt4 import QtCore
 
 if getattr(sys, 'frozen', False):
     app_path = os.path.dirname(sys.executable)
@@ -517,6 +518,9 @@ class GDAL2Mbtiles(object):
         """Print progressbar for float value 0..1"""
 
         gdal.TermProgress_nocb(complete)
+
+    # -------------------------------------------------------------------------
+
 
     # -------------------------------------------------------------------------
     def stop(self):
@@ -1130,7 +1134,6 @@ class GDAL2Mbtiles(object):
                 self.tileswne = rastertileswne
             else:
                 self.tileswne = lambda x, y, z: (0, 0, 0, 0)
-
     # -------------------------------------------------------------------------
     def generate_metadata(self, cur):
         """Generation of main metadata files and HTML viewers (metadata related to particular tiles are generated during the tile processing)."""
@@ -1276,6 +1279,7 @@ class GDAL2Mbtiles(object):
         msg = ''
         tz = self.tmaxz
         count = (tmaxy - tminy + 1) * (tmaxx + 1 - tminx)
+
         for ty in range(tmaxy, tminy - 1, -1):  # range(tminy, tmaxy+1):
             for tx in range(tminx, tmaxx + 1):
                 if self.stopped:
@@ -1401,7 +1405,8 @@ class GDAL2Mbtiles(object):
                                 (tz, tx, ty, sqlite3.Binary(binary.getvalue())))
 
                     del img
-                    del binary
+                    binary.flush()
+                    binary.close()
                     del dstile_array
                     del dstile
                 if not self.options.verbose:
@@ -2641,6 +2646,25 @@ class GDAL2Mbtiles(object):
         cur.execute("""PRAGMA page_size=65536;""")
         cur.execute("""PRAGMA foreign_keys=1;""")
 
+    # -------------------------------------------------------
+    """Methods for work with Progressbar"""
+
+    # -------------------------------------------------------
+class ProgressBar(QtCore.QObject):
+
+    # pbar_signal variable which will emit count of processed tiles to GUI
+    pbar_signal = QtCore.pyqtSignal(int)
+
+    def progress_emiter(self, maxz, minz, processed_tiles, total, overview=False):
+        base_level = float(100) / (maxz - minz+1)
+        if not overview:
+            multiplyer = (base_level)/float(total)
+            self.pbar_signal.emit(int(processed_tiles * multiplyer))
+        else:  # overview tiles
+            level_percent =100- base_level
+            # level_percent = base_level
+            multiplyer = (level_percent)/float(total)
+            self.pbar_signal.emit(int(base_level + processed_tiles * multiplyer))
 
 # =============================================================================
 # =============================================================================
@@ -2684,74 +2708,70 @@ def timing_val(func):
 
 
 @timing_val
-def main(argv = None):
+def main(progress,argv = None):
     queue = multiprocessing.Queue()
-
+    # progress = ProgressBar()
     if not argv:
         argv = gdal.GeneralCmdLineProcessor(sys.argv)
+        # progress = ProgressBar()
 
+    gdal2mbtiles = GDAL2Mbtiles(argv[1:])  # handle command line options
+    proc_count = gdal2mbtiles.options.processes
+    if gdal2mbtiles.options.aux_files:
+        gdal.SetConfigOption("GDAL_PAM_ENABLED", "YES")
+    else:
+        gdal.SetConfigOption("GDAL_PAM_ENABLED", "NO")
+    p = multiprocessing.Process(target=worker_metadata, args=[gdal2mbtiles])
+    p.start()
+    p.join()
+    print("Generating Base Tiles:")
+    tminz = gdal2mbtiles.tminz
+    tmaxz = gdal2mbtiles.tmaxz
+    procs = []
+    for cpu in range(proc_count):
+        proc = multiprocessing.Process(target=worker_base_tiles, args=(argv, cpu, queue,))
+        proc.daemon = True
+        proc.start()
+        procs.append(proc)
+    processed_tiles = 0
+    while len(multiprocessing.active_children()):
+        try:
+            total = queue.get(timeout=1)
+            processed_tiles += 1
+            progress.progress_emiter(tmaxz,tminz,processed_tiles,total)
+            gdal2mbtiles.progressbar(processed_tiles / float(total))
+            sys.stdout.flush()
+        except:
+            pass
+    [p.join(timeout=1) for p in procs]
+    print("\n")
+    print("Generating Overview Tiles:")
+    #  Values generated after base tiles creation
 
-    if argv:
-        gdal2mbtiles = GDAL2Mbtiles(argv[1:])  # handle command line options
-        proc_count = gdal2mbtiles.options.processes
-        if gdal2mbtiles.options.aux_files:
-            gdal.SetConfigOption("GDAL_PAM_ENABLED", "YES")
-        else:
-            gdal.SetConfigOption("GDAL_PAM_ENABLED", "NO")
-
-        p = multiprocessing.Process(target=worker_metadata, args=[gdal2mbtiles])
-        p.start()
-        p.join()
-
-        print("Generating Base Tiles:")
-        procs = []
+    processed_tiles = 0
+    for tz in range(tmaxz - 1, tminz - 1, -1):
         for cpu in range(proc_count):
-            proc = multiprocessing.Process(target=worker_base_tiles, args=(argv, cpu, queue,))
+            proc = multiprocessing.Process(target=worker_overview_tiles, args=(argv, cpu % proc_count, tz, queue))
             proc.daemon = True
             proc.start()
             procs.append(proc)
-        processed_tiles = 0
-        total = queue.get()
-        while (total - processed_tiles):
+        while len(multiprocessing.active_children()):
             try:
-                total = queue.get_nowait()
+                total = queue.get(timeout=1)
                 processed_tiles += 1
-                gdal.TermProgress_nocb(processed_tiles / float(total))
+                progress.progress_emiter(tmaxz, tminz, processed_tiles, total, overview=True)
+                gdal2mbtiles.progressbar(processed_tiles / float(total))
                 sys.stdout.flush()
             except:
                 pass
-        [p.join() for p in procs]
-
-        print("\n")
-        print("Generating Overview Tiles:")
-        #  Values generated after base tiles creation
-        tminz = gdal2mbtiles.tminz
-        tmaxz = gdal2mbtiles.tmaxz
-        processed_tiles = 0
-        for tz in range(tmaxz - 1, tminz - 1, -1):
-
-            for cpu in range(proc_count):
-                proc = multiprocessing.Process(target=worker_overview_tiles, args=(argv, cpu % proc_count, tz, queue))
-                proc.daemon = True
-                proc.start()
-                procs.append(proc)
-
-            while len(multiprocessing.active_children()):
-                try:
-                    total = queue.get(timeout=1)
-                    processed_tiles += 1
-                    gdal.TermProgress_nocb(processed_tiles / float(total))
-                    sys.stdout.flush()
-                except:
-                    pass
-            [p.join(timeout=1) for p in procs]
-
-        print('Indexing tiles')
-        con = gdal2mbtiles.mbtiles_connect()
-        gdal2mbtiles.create_index(con.cursor())
-        con.execute('''PRAGMA journal_mode=DELETE''')
+        [p.join(timeout=1) for p in procs]
+    print('Indexing tiles')
+    con = gdal2mbtiles.mbtiles_connect()
+    gdal2mbtiles.create_index(con.cursor())
+    con.execute('''PRAGMA journal_mode=DELETE''')
 
 
 if __name__ == '__main__':
-    t = main()
+    progress = ProgressBar()
+    t = main(progress)
     print ('Tiling took: {:.2f} seconds '.format(t))
